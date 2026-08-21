@@ -1,0 +1,57 @@
+name: Build Maverick APK
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'maverick-mobile/**'
+      - '.github/workflows/build-maverick-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: maverick-mobile
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Generate Android project
+        run: npx expo prebuild --platform android --non-interactive
+
+      - name: Build release APK
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Copy APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk ./Maverick-Mobile.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Maverick-Mobile-APK
+          path: maverick-mobile/Maverick-Mobile.apk
+          if-no-files-found: error
