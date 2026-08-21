@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gromor Billing Engine</title>
+  <script src="https://cdn.sheetjs.com/xlsx-0.18.5/package/dist/xlsx.full.min.js"></script>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: Arial, sans-serif; margin: 0; background: #f5f7fb; color: #1f2937; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+    h1 { margin: 0 0 8px; }
+    .sub { margin: 0 0 20px; color: #4b5563; }
+    .panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+    label { font-weight: 600; font-size: 14px; display: block; margin-bottom: 6px; }
+    input[type="file"], select, button { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; }
+    button { cursor: pointer; font-weight: 700; }
+    button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+    button.secondary { background: #0f766e; color: #fff; border-color: #0f766e; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .row > * { flex: 1 1 220px; }
+    .mapping-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 14px; }
+    .card h3 { margin: 0 0 10px; }
+    .kpi { display: flex; justify-content: space-between; margin: 6px 0; font-size: 14px; }
+    .fee-pos { color: #047857; font-weight: 800; }
+    .fee-neg { color: #b91c1c; font-weight: 800; }
+    .table-wrap { overflow: auto; max-height: 500px; border: 1px solid #e5e7eb; border-radius: 8px; }
+    table { border-collapse: collapse; width: 100%; background: #fff; }
+    th, td { border-bottom: 1px solid #e5e7eb; padding: 8px; text-align: right; font-size: 13px; white-space: nowrap; }
+    th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+    tr.emi { background: #eff6ff; }
+    tr.tail { background: #fdf2f8; }
+    .muted { color: #6b7280; font-size: 13px; }
+    .hidden { display: none; }
+    .status { margin-top: 8px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Gromor Billing Engine</h1>
+    <p class="sub">Single-file, browser-only monthly service fee calculator (Shiprocket × Gromor).</p>
+
+    <div class="panel">
+      <div class="grid">
+        <div>
+          <label>Loan Details (Required)</label>
+          <input id="loanFile" type="file" accept=".xlsx,.xls,.csv" />
+        </div>
+        <div>
+          <label>Payments File (Required)</label>
+          <input id="paymentFile" type="file" accept=".xlsx,.xls,.csv" />
+        </div>
+        <div>
+          <label>Foreclosure Charges (Optional)</label>
+          <input id="foreclosureFile" type="file" accept=".xlsx,.xls,.csv" />
+        </div>
+        <div>
+          <label>Processing Fees (Optional)</label>
+          <input id="processingFile" type="file" accept=".xlsx,.xls,.csv" />
+        </div>
+      </div>
+      <div class="status" id="fileStatus"></div>
+    </div>
+
+    <div class="panel hidden" id="mappingPanel">
+      <h3>Column Mapping</h3>
+      <p class="muted">Mappings are auto-detected and can be overridden before calculation.</p>
+      <h4>Payments</h4>
+      <div class="mapping-grid" id="paymentMapping"></div>
+      <h4>Foreclosure / Processing (Optional)</h4>
+      <div class="mapping-grid" id="feeMapping"></div>
+    </div>
+
+    <div class="panel row">
+      <button class="primary" id="calcBtn">Calculate Billing</button>
+      <button class="secondary" id="exportBtn" disabled>Download Excel Report</button>
+    </div>
+
+    <div id="results" class="hidden">
+      <div class="panel">
+        <h3>Monthly Summary</h3>
+        <div class="cards" id="summaryCards"></div>
+      </div>
+
+      <div class="panel">
+        <div class="row" style="align-items:center;">
+          <div>
+            <label>Daily Detail Month</label>
+            <select id="monthSelect"></select>
+          </div>
+        </div>
+        <div class="table-wrap"><table id="dailyTable"></table></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const EXCLUDE_IDS = new Set([232521]);
+    const HURDLE_RATE = 0.1975;
+
+    const state = {
+      loanRows: [], paymentRows: [], foreclosureRows: [], processingRows: [],
+      paymentHeaders: [], foreclosureHeaders: [], processingHeaders: [],
+      mapping: {}, feeMapping: {}, results: null
+    };
+
+    const els = {
+      loanFile: document.getElementById('loanFile'), paymentFile: document.getElementById('paymentFile'),
+      foreclosureFile: document.getElementById('foreclosureFile'), processingFile: document.getElementById('processingFile'),
+      fileStatus: document.getElementById('fileStatus'), mappingPanel: document.getElementById('mappingPanel'),
+      paymentMapping: document.getElementById('paymentMapping'), feeMapping: document.getElementById('feeMapping'),
+      calcBtn: document.getElementById('calcBtn'), exportBtn: document.getElementById('exportBtn'),
+      results: document.getElementById('results'), summaryCards: document.getElementById('summaryCards'),
+      monthSelect: document.getElementById('monthSelect'), dailyTable: document.getElementById('dailyTable')
+    };
+
+    function round2(n) { return Math.round((Number(n) + Number.EPSILON) * 100) / 100; }
+    function fmt(n) { return round2(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+    function pad(n){return String(n).padStart(2,'0');}
+    function isoDate(d){return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;}
+    function monthKey(d){return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}`;}
+    function monthLabel(key){const [y,m]=key.split('-').map(Number);return new Date(Date.UTC(y,m-1,1)).toLocaleString('en-IN',{month:'long',year:'numeric',timeZone:'UTC'});}    
+    function addDays(d, n){const x=new Date(d.getTime()); x.setUTCDate(x.getUTCDate()+n); return x;}
+    function endOfMonth(d){return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth()+1, 0));}
+
+    function parseDate(v) {
+      if (v === null || v === undefined || v === '') return null;
+      if (v instanceof Date && !isNaN(v)) return new Date(Date.UTC(v.getFullYear(), v.getMonth(), v.getDate()));
+      if (typeof v === 'number') {
+        const utc = Math.round((v - 25569) * 86400 * 1000);
+        const d = new Date(utc);
+        return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+      }
+      const s = String(v).trim();
+      const m1 = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
+      if (m1) {
+        let y = Number(m1[3]); if (y < 100) y += 2000;
+        return new Date(Date.UTC(y, Number(m1[2]) - 1, Number(m1[1])));
+      }
+      const m2 = s.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+      if (m2) {
+        const months = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+        const mon = months[m2[2].toLowerCase()];
+        if (mon !== undefined) return new Date(Date.UTC(Number(m2[3]), mon, Number(m2[1])));
+      }
+      const m3 = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+      if (m3) return new Date(Date.UTC(Number(m3[1]), Number(m3[2])-1, Number(m3[3])));
+      const d = new Date(s);
+      return isNaN(d) ? null : new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    }
+
+    function num(v){
+      if (v === null || v === undefined || v === '') return 0;
+      if (typeof v === 'number') return v;
+      return Number(String(v).replace(/[,₹\s]/g,'')) || 0;
+    }
+
+    async function readRows(file) {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type:'array', cellDates:false });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval:'', raw:true });
+      return { rows, headers: Object.keys(rows[0] || {}) };
+    }
+
+    function norm(h){return String(h||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,' ');}
+    function detect(headers, keywords){
+      const hs = headers.map(h => ({h, n:norm(h)}));
+      for (const fn of keywords) {
+        const m = hs.find(x => fn(x.n));
+        if (m) return m.h;
+      }
+      return '';
+    }
+
+    function buildMappings() {
+      state.mapping = {
+        paymentDate: detect(state.paymentHeaders, [n=>n.includes('payment date'), n=>n==='date']),
+        loanId: detect(state.paymentHeaders, [n=>n.includes('loan id'), n=>n.includes('loanid')]),
+        principal: detect(state.paymentHeaders, [n=>n.includes('principal received'), n=>n==='principal']),
+        interest: detect(state.paymentHeaders, [n=>n.includes('interest received') && !n.includes('delayed')]),
+        delayedInterest: detect(state.paymentHeaders, [n=>n.includes('delayed interest')]),
+        penalty: detect(state.paymentHeaders, [n=>n.includes('penalty received'), n=>n==='penalty'])
+      };
+      state.feeMapping = {
+        foreclosureDate: detect(state.foreclosureHeaders, [n=>n.includes('date')]),
+        foreclosureAmount: detect(state.foreclosureHeaders, [n=>n.includes('amount'), n=>n.includes('amt'), n=>n.includes('fee')]),
+        processingDate: detect(state.processingHeaders, [n=>n.includes('date')]),
+        processingAmount: detect(state.processingHeaders, [n=>n.includes('amount'), n=>n.includes('amt'), n=>n.includes('fee')])
+      };
+      renderMappings();
+    }
+
+    function mappingSelect(id, label, headers, value) {
+      return `<div><label>${label}</label><select id="${id}"><option value="">-- Select --</option>${headers.map(h=>`<option ${h===value?'selected':''}>${h}</option>`).join('')}</select></div>`;
+    }
+
+    function renderMappings(){
+      els.mappingPanel.classList.remove('hidden');
+      els.paymentMapping.innerHTML = [
+        mappingSelect('mapPaymentDate','Payment Date',state.paymentHeaders,state.mapping.paymentDate),
+        mappingSelect('mapLoanId','Loan ID',state.paymentHeaders,state.mapping.loanId),
+        mappingSelect('mapPrincipal','Principal Received',state.paymentHeaders,state.mapping.principal),
+        mappingSelect('mapInterest','Interest Received',state.paymentHeaders,state.mapping.interest),
+        mappingSelect('mapDelayedInterest','Delayed Interest Received',state.paymentHeaders,state.mapping.delayedInterest),
+        mappingSelect('mapPenalty','Penalty Received',state.paymentHeaders,state.mapping.penalty)
+      ].join('');
+      const feeHeaders = Array.from(new Set([...state.foreclosureHeaders, ...state.processingHeaders]));
+      els.feeMapping.innerHTML = [
+        mappingSelect('mapForeclosureDate','Foreclosure Date',feeHeaders,state.feeMapping.foreclosureDate),
+        mappingSelect('mapForeclosureAmount','Foreclosure Amount',feeHeaders,state.feeMapping.foreclosureAmount),
+        mappingSelect('mapProcessingDate','Processing Date',feeHeaders,state.feeMapping.processingDate),
+        mappingSelect('mapProcessingAmount','Processing Amount',feeHeaders,state.feeMapping.processingAmount)
+      ].join('');
+    }
+
+    function loadMappingsFromUI() {
+      state.mapping.paymentDate = document.getElementById('mapPaymentDate')?.value || '';
+      state.mapping.loanId = document.getElementById('mapLoanId')?.value || '';
+      state.mapping.principal = document.getElementById('mapPrincipal')?.value || '';
+      state.mapping.interest = document.getElementById('mapInterest')?.value || '';
+      state.mapping.delayedInterest = document.getElementById('mapDelayedInterest')?.value || '';
+      state.mapping.penalty = document.getElementById('mapPenalty')?.value || '';
+      state.feeMapping.foreclosureDate = document.getElementById('mapForeclosureDate')?.value || '';
+      state.feeMapping.foreclosureAmount = document.getElementById('mapForeclosureAmount')?.value || '';
+      state.feeMapping.processingDate = document.getElementById('mapProcessingDate')?.value || '';
+      state.feeMapping.processingAmount = document.getElementById('mapProcessingAmount')?.value || '';
+    }
+
+    function getLoanField(row, guesses) {
+      const keys = Object.keys(row);
+      const key = detect(keys, guesses);
+      return row[key];
+    }
+
+    function buildContractedSchedule(loan) {
+      const schedule = new Map();
+      let pos = loan.gross;
+      let date = loan.emiStart;
+      let loops = 0;
+      while (pos > 0.01 && loops < 1500) {
+        const weeklyInterest = round2(pos * (loan.rate / 52));
+        const principalReduction = Math.max(0, round2(loan.installment - weeklyInterest));
+        const principalApplied = Math.min(pos, principalReduction);
+        schedule.set(isoDate(date), principalApplied);
+        pos = round2(pos - principalApplied);
+        date = addDays(date, 7);
+        loops++;
+      }
+      return schedule;
+    }
+
+    function sumFeeByMonth(rows, dateCol, amountCol, share) {
+      const map = new Map();
+      for (const r of rows) {
+        const d = parseDate(r[dateCol]);
+        if (!d) continue;
+        const key = monthKey(d);
+        map.set(key, round2((map.get(key)||0) + round2(num(r[amountCol]) * share)));
+      }
+      return map;
+    }
+
+    function calculate() {
+      loadMappingsFromUI();
+      const required = ['paymentDate','loanId','principal','interest','delayedInterest','penalty'];
+      for (const k of required) if (!state.mapping[k]) throw new Error(`Missing mapping: ${k}`);
+
+      const loans = state.loanRows.map(r => {
+        const id = String(getLoanField(r,[n=>n==='loan id',n=>n.includes('loan id'),n=>n==='loanid'])).trim();
+        const gross = num(getLoanField(r,[n=>n.includes('gross amount disbursed'),n=>n.includes('disbursed'),n=>n.includes('gross amount')]));
+        const disbursement = parseDate(getLoanField(r,[n=>n.includes('disbursement date')]));
+        const emiStart = parseDate(getLoanField(r,[n=>n.includes('emi start date')]));
+        const installment = num(getLoanField(r,[n=>n.includes('installment amount'),n=>n.includes('emi amount')]));
+        const roi = num(getLoanField(r,[n=>n.includes('rate of interest'),n=>n==='roi',n=>n.includes('interest %')]));
+        const rate = roi > 1 ? roi/100 : roi;
+        return { id, gross, disbursement, emiStart, installment, rate };
+      }).filter(l => l.id && l.gross>0 && l.disbursement && l.emiStart && l.installment>0 && l.rate>0 && !EXCLUDE_IDS.has(Number(l.id)));
+
+      const paymentEvents = new Map();
+      const paymentMonths = new Set();
+      for (const r of state.paymentRows) {
+        const d = parseDate(r[state.mapping.paymentDate]);
+        if (!d) continue;
+        const loanId = String(r[state.mapping.loanId] ?? '').trim();
+        const key = `${loanId}|${isoDate(d)}`;
+        const prev = paymentEvents.get(key) || { principal:0, interest:0, delayed:0, penalty:0 };
+        prev.principal = round2(prev.principal + num(r[state.mapping.principal]));
+        prev.interest = round2(prev.interest + num(r[state.mapping.interest]));
+        prev.delayed = round2(prev.delayed + num(r[state.mapping.delayedInterest]));
+        prev.penalty = round2(prev.penalty + num(r[state.mapping.penalty]));
+        paymentEvents.set(key, prev);
+        paymentMonths.add(monthKey(d));
+      }
+      const months = Array.from(paymentMonths).sort();
+      if (!months.length) throw new Error('No valid payment dates found.');
+
+      const foreclosureByMonth = state.feeMapping.foreclosureDate && state.feeMapping.foreclosureAmount
+        ? sumFeeByMonth(state.foreclosureRows, state.feeMapping.foreclosureDate, state.feeMapping.foreclosureAmount, 0.5)
+        : new Map();
+      const processingByMonth = state.feeMapping.processingDate && state.feeMapping.processingAmount
+        ? sumFeeByMonth(state.processingRows, state.feeMapping.processingDate, state.feeMapping.processingAmount, 0.75)
+        : new Map();
+
+      const monthDaily = new Map(months.map(m=>[m,[]]));
+      const monthSummary = new Map(months.map(m=>[m,{avgPos:0,yInt:0,yDelayed:0,z:0,p:0,f:0,x:0,carry:0,serviceFee:0}]));
+
+      for (const loan of loans) {
+        const schedule = buildContractedSchedule(loan);
+        const scheduleDates = Array.from(schedule.keys()).sort();
+        let actualPos = round2(loan.gross);
+        let contractedPos = round2(loan.gross);
+        const endDate = endOfMonth(new Date(Date.UTC(Number(months[months.length-1].slice(0,4)), Number(months[months.length-1].slice(5,7))-1, 1)));
+        for (let d = new Date(loan.disbursement.getTime()); d <= endDate && actualPos > 0; d = addDays(d,1)) {
+          const dKey = isoDate(d);
+          if (schedule.has(dKey)) contractedPos = round2(Math.max(0, contractedPos - schedule.get(dKey)));
+
+          const evt = paymentEvents.get(`${loan.id}|${dKey}`) || { principal:0, interest:0, delayed:0, penalty:0 };
+          actualPos = round2(Math.max(0, actualPos - evt.principal));
+
+          const mKey = monthKey(d);
+          if (!monthDaily.has(mKey)) continue;
+
+          const contractedInterest = round2(contractedPos * loan.rate / 365);
+          const hurdle = round2(actualPos * HURDLE_RATE / 365);
+          const unrealised = round2(contractedInterest - hurdle);
+
+          const monthStart = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+          const monthEnd = endOfMonth(d);
+          const lastEmiInMonth = scheduleDates.filter(x => x >= isoDate(monthStart) && x <= isoDate(monthEnd)).pop();
+          const isTail = lastEmiInMonth ? dKey > lastEmiInMonth : scheduleDates.some(x => x < isoDate(monthStart));
+
+          monthDaily.get(mKey).push({
+            date:dKey, closingPos:actualPos, contractedPos, principal:evt.principal,
+            interest:evt.interest, delayed:evt.delayed, contractedInterest, hurdle,
+            unrealised, type: evt.principal > 0 ? 'EMI' : (isTail ? 'Tail' : '')
+          });
+
+          const s = monthSummary.get(mKey);
+          s.avgPos = round2(s.avgPos + actualPos);
+          s.yInt = round2(s.yInt + evt.interest);
+          s.yDelayed = round2(s.yDelayed + evt.delayed);
+          s.z = round2(s.z + round2(evt.penalty * 0.5));
+          s.x = round2(s.x + hurdle);
+          if (isTail) s.carry = round2(s.carry + unrealised);
+        }
+      }
+
+      for (const m of months) {
+        const s = monthSummary.get(m);
+        const daily = monthDaily.get(m).sort((a,b)=>a.date.localeCompare(b.date));
+        const grouped = new Map();
+        for (const r of daily) {
+          const g = grouped.get(r.date) || { ...r };
+          if (grouped.has(r.date)) {
+            g.closingPos = round2(g.closingPos + r.closingPos);
+            g.contractedPos = round2(g.contractedPos + r.contractedPos);
+            g.principal = round2(g.principal + r.principal);
+            g.interest = round2(g.interest + r.interest);
+            g.delayed = round2(g.delayed + r.delayed);
+            g.contractedInterest = round2(g.contractedInterest + r.contractedInterest);
+            g.hurdle = round2(g.hurdle + r.hurdle);
+            g.unrealised = round2(g.unrealised + r.unrealised);
+            g.type = g.type || r.type;
+          }
+          grouped.set(r.date, g);
+        }
+        const rows = Array.from(grouped.values()).sort((a,b)=>a.date.localeCompare(b.date));
+        monthDaily.set(m, rows);
+        const daysInMonth = endOfMonth(new Date(m + '-01T00:00:00Z')).getUTCDate();
+        s.avgPos = round2(s.avgPos / daysInMonth);
+        s.p = round2(processingByMonth.get(m) || 0);
+        s.f = round2(foreclosureByMonth.get(m) || 0);
+        s.serviceFee = round2((s.yInt + s.yDelayed) + s.z + s.p + s.f - s.x);
+      }
+
+      return { months, monthSummary, monthDaily };
+    }
+
+    function renderResults(result) {
+      state.results = result;
+      els.results.classList.remove('hidden');
+      els.exportBtn.disabled = false;
+      els.summaryCards.innerHTML = result.months.map(m => {
+        const s = result.monthSummary.get(m);
+        const feeClass = s.serviceFee >= 0 ? 'fee-pos' : 'fee-neg';
+        return `<div class="card">
+          <h3>${monthLabel(m)}</h3>
+          <div class="kpi"><span>Average daily closing POS</span><strong>₹${fmt(s.avgPos)}</strong></div>
+          <div class="kpi"><span>Interest collected (Y)</span><strong>₹${fmt(s.yInt)}</strong></div>
+          ${s.yDelayed ? `<div class="kpi"><span>Delayed interest (Y)</span><strong>₹${fmt(s.yDelayed)}</strong></div>`:''}
+          ${s.z ? `<div class="kpi"><span>50% Penalty (Z)</span><strong>₹${fmt(s.z)}</strong></div>`:''}
+          ${s.f ? `<div class="kpi"><span>50% Foreclosure (F)</span><strong>₹${fmt(s.f)}</strong></div>`:''}
+          ${s.p ? `<div class="kpi"><span>75% Processing (P)</span><strong>₹${fmt(s.p)}</strong></div>`:''}
+          <div class="kpi"><span>Hurdle @ 19.75% (X)</span><strong>₹${fmt(s.x)}</strong></div>
+          <div class="kpi"><span>Closing carry forward (memo)</span><strong>₹${fmt(s.carry)}</strong></div>
+          <hr />
+          <div class="kpi ${feeClass}"><span>Service Fee = Y + Z + P + F − X</span><span>₹${fmt(s.serviceFee)}</span></div>
+        </div>`;
+      }).join('');
+
+      els.monthSelect.innerHTML = result.months.map(m=>`<option value="${m}">${monthLabel(m)}</option>`).join('');
+      renderDailyTable(result.months[0]);
+    }
+
+    function renderDailyTable(month) {
+      const rows = state.results.monthDaily.get(month) || [];
+      const headers = ['Date','Total Closing POS','Total Contracted POS','Principal Received','Interest Collected','Delayed Interest','Contracted Interest','Hurdle @ 19.75%','Unrealised Income','Type'];
+      let html = `<thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>`;
+      for (const r of rows) {
+        const cls = r.type === 'EMI' ? 'emi' : (r.type === 'Tail' ? 'tail' : '');
+        html += `<tr class="${cls}"><td>${r.date}</td><td>₹${fmt(r.closingPos)}</td><td>₹${fmt(r.contractedPos)}</td><td>₹${fmt(r.principal)}</td><td>₹${fmt(r.interest)}</td><td>₹${fmt(r.delayed)}</td><td>₹${fmt(r.contractedInterest)}</td><td>₹${fmt(r.hurdle)}</td><td>₹${fmt(r.unrealised)}</td><td>${r.type}</td></tr>`;
+      }
+      html += '</tbody>';
+      els.dailyTable.innerHTML = html;
+    }
+
+    function exportExcel() {
+      const wb = XLSX.utils.book_new();
+      const summaryRows = state.results.months.map(m => {
+        const s = state.results.monthSummary.get(m);
+        return {
+          Month: monthLabel(m),
+          'Average Daily Closing POS': s.avgPos,
+          'Interest Collected (Y)': s.yInt,
+          'Delayed Interest (Y)': s.yDelayed,
+          '50% Penalty (Z)': s.z,
+          '75% Processing Fees (P)': s.p,
+          '50% Foreclosure Charges (F)': s.f,
+          'Hurdle @ 19.75% (X)': s.x,
+          'Closing Carry Forward (Memo)': s.carry,
+          'Service Fee (Y+Z+P+F-X)': s.serviceFee
+        };
+      });
+      const totals = summaryRows.reduce((a,r)=>{Object.keys(r).forEach(k=>{if(typeof r[k]==='number') a[k]=(a[k]||0)+r[k];});return a;}, {Month:'TOTAL'});
+      summaryRows.push(totals);
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), 'Monthly Summary');
+
+      for (const m of state.results.months) {
+        const rows = state.results.monthDaily.get(m).map(r => ({
+          Date:r.date,'Total Closing POS':r.closingPos,'Total Contracted POS':r.contractedPos,
+          'Principal Received':r.principal,'Interest Collected':r.interest,'Delayed Interest':r.delayed,
+          'Contracted Interest':r.contractedInterest,'Hurdle @ 19.75%':r.hurdle,
+          'Unrealised Income':r.unrealised,Type:r.type
+        }));
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), monthLabel(m).slice(0,31));
+      }
+      XLSX.writeFile(wb, 'Gromor_Billing_Report.xlsx');
+    }
+
+    async function refreshFiles() {
+      try {
+        if (els.loanFile.files[0]) {
+          const x = await readRows(els.loanFile.files[0]);
+          state.loanRows = x.rows;
+        }
+        if (els.paymentFile.files[0]) {
+          const x = await readRows(els.paymentFile.files[0]);
+          state.paymentRows = x.rows;
+          state.paymentHeaders = x.headers;
+        }
+        if (els.foreclosureFile.files[0]) {
+          const x = await readRows(els.foreclosureFile.files[0]);
+          state.foreclosureRows = x.rows;
+          state.foreclosureHeaders = x.headers;
+        } else {
+          state.foreclosureRows = []; state.foreclosureHeaders = [];
+        }
+        if (els.processingFile.files[0]) {
+          const x = await readRows(els.processingFile.files[0]);
+          state.processingRows = x.rows;
+          state.processingHeaders = x.headers;
+        } else {
+          state.processingRows = []; state.processingHeaders = [];
+        }
+
+        if (state.paymentHeaders.length) buildMappings();
+        const okRequired = state.loanRows.length && state.paymentRows.length;
+        els.fileStatus.textContent = okRequired
+          ? `Loaded: ${state.loanRows.length} loan rows, ${state.paymentRows.length} payment rows.`
+          : 'Upload both required files to proceed.';
+      } catch (e) {
+        els.fileStatus.textContent = `Error reading files: ${e.message}`;
+      }
+    }
+
+    [els.loanFile, els.paymentFile, els.foreclosureFile, els.processingFile].forEach(inp => inp.addEventListener('change', refreshFiles));
+    els.calcBtn.addEventListener('click', () => {
+      try {
+        if (!state.loanRows.length || !state.paymentRows.length) throw new Error('Required files are missing.');
+        renderResults(calculate());
+      } catch (e) {
+        alert(`Calculation failed: ${e.message}`);
+      }
+    });
+    els.exportBtn.addEventListener('click', exportExcel);
+    els.monthSelect.addEventListener('change', e => renderDailyTable(e.target.value));
+  </script>
+</body>
+</html>
